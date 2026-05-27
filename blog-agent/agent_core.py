@@ -15,6 +15,83 @@ def clean_json(raw: str) -> str:
     return raw.strip()
 
 
+def safe_parse_article_json(raw: str, fallback_topic: str = "") -> dict:
+    """
+    Parse AI-returned article JSON with 4 fallback strategies.
+    Handles: unescaped newlines/quotes in content field, truncated output,
+    markdown code fences, and other common LLM JSON quirks.
+    """
+    # ── Strategy 1: direct parse ──────────────────────────────────────
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        pass
+
+    # ── Strategy 2: find outermost {} block ───────────────────────────
+    m = re.search(r'\{[\s\S]*\}', raw)
+    if m:
+        try:
+            return json.loads(m.group())
+        except json.JSONDecodeError:
+            pass
+
+    # ── Strategy 3: re-escape the content field then reparse ──────────
+    # The "content" field is almost always what breaks JSON — it's long
+    # markdown with newlines, backtick fences, and double-quotes.
+    try:
+        cs = re.search(r'"content"\s*:\s*"', raw)
+        if cs:
+            after = raw[cs.end():]
+            # content ends where "excerpt" or "}" begins at same level
+            end_m = re.search(r'",?\s*"excerpt"\s*:', after)
+            if end_m:
+                content_raw = after[:end_m.start()]
+                # escape bare newlines / carriage returns inside the string
+                content_safe = content_raw.replace('\r\n', '\\n').replace('\n', '\\n').replace('\r', '\\n')
+                rebuilt = raw[:cs.end()] + content_safe + after[end_m.start():]
+                return json.loads(rebuilt)
+    except Exception:
+        pass
+
+    # ── Strategy 4: field-by-field regex extraction ───────────────────
+    def _str(field: str) -> str:
+        m = re.search(rf'"{field}"\s*:\s*"((?:[^"\\]|\\.)*)"', raw)
+        if m:
+            return m.group(1).replace('\\n', '\n').replace('\\"', '"')
+        return ""
+
+    def _int(field: str, default: int) -> int:
+        m = re.search(rf'"{field}"\s*:\s*(\d+)', raw)
+        return int(m.group(1)) if m else default
+
+    def _list(field: str) -> list:
+        m = re.search(rf'"{field}"\s*:\s*\[(.*?)\]', raw, re.DOTALL)
+        return re.findall(r'"([^"]+)"', m.group(1)) if m else []
+
+    # content: grab everything between "content": " and the next field
+    content = ""
+    m = re.search(r'"content"\s*:\s*"([\s\S]+?)"(?:\s*,\s*"|\s*\})', raw)
+    if m:
+        content = m.group(1).replace('\\n', '\n').replace('\\"', '"')
+    else:
+        m = re.search(r'"content"\s*:\s*"([\s\S]+)', raw)
+        if m:
+            content = m.group(1)[:10000]
+
+    slug = _str("slug") or re.sub(r'[^a-z0-9\-]', '', fallback_topic.lower().replace(" ", "-"))[:50]
+
+    return {
+        "title":             _str("title")            or fallback_topic,
+        "meta_description":  _str("meta_description"),
+        "focus_keyword":     _str("focus_keyword")    or fallback_topic,
+        "slug":              slug,
+        "tags":              _list("tags"),
+        "read_time_minutes": _int("read_time_minutes", 8),
+        "content":           content or raw,
+        "excerpt":           _str("excerpt"),
+    }
+
+
 # ─── AI client ────────────────────────────────────────────────────────
 
 def get_ai_client(gemini_key: str, groq_key: str, gemini_model: str = "gemini-2.5-flash", groq_model: str = "llama-3.3-70b-versatile"):
@@ -89,17 +166,7 @@ Return ONLY valid JSON, no markdown fences:
 }}"""
 
     raw = clean_json(ai_generate(ai, prompt))
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError:
-        match = re.search(r'\{.*\}', raw, re.DOTALL)
-        data = json.loads(match.group()) if match else {
-            "title": topic, "content": raw, "tags": [],
-            "slug": re.sub(r'[^a-z0-9\-]', '', topic.lower().replace(" ", "-")),
-            "meta_description": "", "focus_keyword": topic,
-            "read_time_minutes": 8, "excerpt": raw[:200]
-        }
-    return data
+    return safe_parse_article_json(raw, fallback_topic=topic)
 
 
 # ─── Step 2: Affiliate links ─────────────────────────────────────────
