@@ -219,11 +219,14 @@ Article excerpt: {article_content[:600]}"""
 # ─── Step 4: Image URL ───────────────────────────────────────────────
 
 def generate_image_url(topic: str) -> str:
+    from urllib.parse import quote
+    # Strip special chars that break URL validation on Dev.to / Hashnode
+    clean_topic = re.sub(r'[^\w\s,]', '', topic)[:80]
     prompt = (
-        f"professional tech blog header, {topic}, "
-        "dark background, glowing circuits, blue cyan accent, modern minimal, 16:9, no text"
+        f"professional tech blog header, {clean_topic}, "
+        "dark background glowing circuits blue cyan accent modern minimal 16:9 no text"
     )
-    encoded = prompt.replace(" ", "%20").replace(",", "%2C")
+    encoded = quote(prompt, safe='')
     return f"https://image.pollinations.ai/prompt/{encoded}?width=1200&height=630&nologo=true"
 
 
@@ -436,18 +439,24 @@ def publish_devto(article: dict, social: dict, seo: dict, image_url: str, api_ke
     import requests
     raw_tags  = social.get("dev_to_tags", article.get("tags", []))
     safe_tags = _sanitize_devto_tags(raw_tags)
-    title     = article.get("title", "")[:128]   # Dev.to max title length
+    title     = article.get("title", "")[:128]
     desc      = seo.get("meta_description", "")[:160]
-    payload   = {"article": {
+
+    # Only include main_image if URL looks safe (no unencoded spaces/special chars)
+    safe_image = image_url if image_url and image_url.startswith("http") and " " not in image_url else None
+
+    article_body = {"article": {
         "title":         title,
         "body_markdown": article.get("content", ""),
         "published":     True,
         "tags":          safe_tags,
         "description":   desc,
-        "main_image":    image_url,
     }}
+    if safe_image:
+        article_body["article"]["main_image"] = safe_image
+
     r = requests.post("https://dev.to/api/articles",
-                      json=payload, headers={"api-key": api_key}, timeout=30)
+                      json=article_body, headers={"api-key": api_key}, timeout=30)
     if not r.ok:
         raise RuntimeError(f"Dev.to {r.status_code}: {r.text[:300]}")
     return f"https://dev.to{r.json().get('path','')}"
