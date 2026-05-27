@@ -101,12 +101,22 @@ def get_ai_client(gemini_key: str, groq_key: str, gemini_model: str = "gemini-2.
     """
     if gemini_key and len(gemini_key) > 10:
         try:
-            import google.generativeai as genai
-            genai.configure(api_key=gemini_key)
-            model = genai.GenerativeModel(gemini_model)
+            from google import genai as google_genai
+            client = google_genai.Client(api_key=gemini_key)
             # quick smoke test
-            model.generate_content("Say OK", generation_config={"max_output_tokens": 5})
-            return ("gemini", model, gemini_model)
+            client.models.generate_content(model=gemini_model, contents="Say OK")
+            return ("gemini", client, gemini_model)
+        except ImportError:
+            # fallback: try old deprecated package if new one not installed yet
+            try:
+                import google.generativeai as genai  # type: ignore
+                import warnings; warnings.filterwarnings("ignore")
+                genai.configure(api_key=gemini_key)
+                model = genai.GenerativeModel(gemini_model)
+                model.generate_content("Say OK", generation_config={"max_output_tokens": 5})
+                return ("gemini_old", model, gemini_model)
+            except Exception:
+                pass
         except Exception as e:
             pass  # fall through to groq
 
@@ -124,6 +134,9 @@ def get_ai_client(gemini_key: str, groq_key: str, gemini_model: str = "gemini-2.
 def ai_generate(client_tuple, prompt: str, max_tokens: int = 8000) -> str:
     kind, client, model = client_tuple
     if kind == "gemini":
+        resp = client.models.generate_content(model=model, contents=prompt)
+        return resp.text
+    elif kind == "gemini_old":
         resp = client.generate_content(prompt)
         return resp.text
     else:
@@ -405,19 +418,38 @@ def assemble_video(script_data: dict, audio_path: str, video_output_path: str,
 
 # ─── Publishing ───────────────────────────────────────────────────────
 
+def _sanitize_devto_tags(tags: list) -> list:
+    """Dev.to tags: lowercase, alphanumeric + hyphens only, max 20 chars, max 4 tags."""
+    clean = []
+    for t in tags:
+        t = str(t).lower().strip()
+        t = re.sub(r'[^a-z0-9\-]', '', t.replace(' ', ''))
+        t = t[:20]
+        if t and t not in clean:
+            clean.append(t)
+        if len(clean) == 4:
+            break
+    return clean
+
+
 def publish_devto(article: dict, social: dict, seo: dict, image_url: str, api_key: str) -> str:
     import requests
-    payload = {"article": {
-        "title":         article.get("title", ""),
+    raw_tags  = social.get("dev_to_tags", article.get("tags", []))
+    safe_tags = _sanitize_devto_tags(raw_tags)
+    title     = article.get("title", "")[:128]   # Dev.to max title length
+    desc      = seo.get("meta_description", "")[:160]
+    payload   = {"article": {
+        "title":         title,
         "body_markdown": article.get("content", ""),
         "published":     True,
-        "tags":          social.get("dev_to_tags", article.get("tags", []))[:4],
-        "description":   seo.get("meta_description", ""),
+        "tags":          safe_tags,
+        "description":   desc,
         "main_image":    image_url,
     }}
     r = requests.post("https://dev.to/api/articles",
                       json=payload, headers={"api-key": api_key}, timeout=30)
-    r.raise_for_status()
+    if not r.ok:
+        raise RuntimeError(f"Dev.to {r.status_code}: {r.text[:300]}")
     return f"https://dev.to{r.json().get('path','')}"
 
 
@@ -450,26 +482,47 @@ def publish_hashnode(article: dict, social: dict, seo: dict, image_url: str,
     import requests
     mutation = """
     mutation PublishPost($input: PublishPostInput!) {
-      publishPost(input: $input) { post { url } }
+      publishPost(input: $input) {
+        post { url id title }
+      }
     }"""
+
+    raw_tags = social.get("hashnode_tags", article.get("tags", []))[:5]
+    hn_tags  = [{"name": str(t)[:50], "slug": re.sub(r'[^a-z0-9\-]', '',
+                  str(t).lower().replace(" ", "-"))[:50]}
+                for t in raw_tags if t]
+
     variables = {"input": {
-        "title":           article.get("title", ""),
+        "title":           article.get("title", "")[:250],
         "contentMarkdown": article.get("content", ""),
         "publicationId":   pub_id,
-        "tags": [{"name": t, "slug": t.lower().replace(" ", "-")}
-                 for t in social.get("hashnode_tags", article.get("tags", []))[:3]],
+        "tags":            hn_tags,
         "coverImageOptions": {"coverImageURL": image_url},
         "metaTags": {
-            "title":       seo.get("seo_title", ""),
-            "description": seo.get("meta_description", ""),
+            "title":       seo.get("seo_title", article.get("title", ""))[:70],
+            "description": seo.get("meta_description", "")[:160],
         }
     }}
+
+    headers = {
+        "Authorization": api_key,   # Hashnode uses token directly (no Bearer)
+        "Content-Type":  "application/json",
+    }
     r = requests.post("https://gql.hashnode.com",
                       json={"query": mutation, "variables": variables},
-                      headers={"Authorization": api_key}, timeout=30)
+                      headers=headers, timeout=30)
+
+    # Raise a clear error showing the raw response if something is wrong
+    if not r.ok:
+        raise RuntimeError(f"Hashnode HTTP {r.status_code}: {r.text[:400]}")
+    if not r.text.strip():
+        raise RuntimeError("Hashnode returned an empty response — check your API key and Publication ID.")
+
     data = r.json()
     if "errors" in data:
-        raise RuntimeError(str(data["errors"]))
+        msgs = "; ".join(e.get("message", str(e)) for e in data["errors"])
+        raise RuntimeError(f"Hashnode GraphQL error: {msgs}")
+
     return data.get("data", {}).get("publishPost", {}).get("post", {}).get("url", "")
 
 
