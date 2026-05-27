@@ -96,49 +96,87 @@ def safe_parse_article_json(raw: str, fallback_topic: str = "") -> dict:
 
 def get_ai_client(gemini_key: str, groq_key: str, gemini_model: str = "gemini-2.5-flash", groq_model: str = "llama-3.3-70b-versatile"):
     """
-    Returns ("gemini", model) or ("groq", client).
-    Raises RuntimeError if neither key works.
+    Returns 4-tuple: (kind, primary_client, model, groq_fallback_or_None)
+    groq_fallback is (groq_client, groq_model) used automatically on 429/quota errors.
     """
+    # ── Always set up Groq fallback if key available ───────────────────
+    groq_fallback = None
+    if groq_key and len(groq_key) > 10:
+        try:
+            from groq import Groq
+            groq_fallback = (Groq(api_key=groq_key), groq_model)
+        except Exception:
+            pass
+
+    # ── Try Gemini (new SDK) ───────────────────────────────────────────
     if gemini_key and len(gemini_key) > 10:
         try:
             from google import genai as google_genai
             client = google_genai.Client(api_key=gemini_key)
-            # quick smoke test
             client.models.generate_content(model=gemini_model, contents="Say OK")
-            return ("gemini", client, gemini_model)
+            return ("gemini", client, gemini_model, groq_fallback)
         except ImportError:
-            # fallback: try old deprecated package if new one not installed yet
             try:
                 import google.generativeai as genai  # type: ignore
                 import warnings; warnings.filterwarnings("ignore")
                 genai.configure(api_key=gemini_key)
-                model = genai.GenerativeModel(gemini_model)
-                model.generate_content("Say OK", generation_config={"max_output_tokens": 5})
-                return ("gemini_old", model, gemini_model)
+                mdl = genai.GenerativeModel(gemini_model)
+                mdl.generate_content("Say OK", generation_config={"max_output_tokens": 5})
+                return ("gemini_old", mdl, gemini_model, groq_fallback)
             except Exception:
                 pass
-        except Exception as e:
-            pass  # fall through to groq
+        except Exception:
+            pass  # quota or other error on smoke test — fall through
 
-    if groq_key and len(groq_key) > 10:
-        try:
-            from groq import Groq
-            client = Groq(api_key=groq_key)
-            return ("groq", client, groq_model)
-        except Exception as e:
-            raise RuntimeError(f"Both Gemini and Groq failed. Last error: {e}")
+    # ── Use Groq directly ─────────────────────────────────────────────
+    if groq_fallback:
+        groq_client, gmodel = groq_fallback
+        return ("groq", groq_client, gmodel, None)
 
-    raise RuntimeError("No valid API keys provided. Add GEMINI_API_KEY or GROQ_API_KEY.")
+    raise RuntimeError("No valid API keys. Add GEMINI_API_KEY or GROQ_API_KEY in Streamlit secrets.")
+
+
+_QUOTA_SIGNALS = ("429", "quota", "ResourceExhausted", "RESOURCE_EXHAUSTED",
+                  "rate_limit", "rate limit", "RateLimitError")
 
 
 def ai_generate(client_tuple, prompt: str, max_tokens: int = 8000) -> str:
-    kind, client, model = client_tuple
+    kind     = client_tuple[0]
+    client   = client_tuple[1]
+    model    = client_tuple[2]
+    fallback = client_tuple[3] if len(client_tuple) > 3 else None
+
+    def _groq_generate():
+        if not fallback:
+            raise RuntimeError("Gemini quota exceeded and no Groq fallback key configured.")
+        groq_client, groq_model = fallback
+        resp = groq_client.chat.completions.create(
+            model=groq_model,
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=max_tokens
+        )
+        return resp.choices[0].message.content
+
+    def _is_quota_error(e):
+        msg = str(e)
+        return any(s in msg for s in _QUOTA_SIGNALS)
+
     if kind == "gemini":
-        resp = client.models.generate_content(model=model, contents=prompt)
-        return resp.text
+        try:
+            resp = client.models.generate_content(model=model, contents=prompt)
+            return resp.text
+        except Exception as e:
+            if _is_quota_error(e):
+                return _groq_generate()
+            raise
     elif kind == "gemini_old":
-        resp = client.generate_content(prompt)
-        return resp.text
+        try:
+            resp = client.generate_content(prompt)
+            return resp.text
+        except Exception as e:
+            if _is_quota_error(e):
+                return _groq_generate()
+            raise
     else:
         resp = client.chat.completions.create(
             model=model,
