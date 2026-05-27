@@ -296,7 +296,7 @@ with tab_results:
 
         # ── Cover image preview ──
         if r.get("image_url"):
-            st.image(r["image_url"], caption="Header image (Pollinations.ai)", use_container_width=True)
+            st.image(r["image_url"], caption="Header image (Pollinations.ai)", width="stretch")
 
         # ── Download buttons ──
         st.markdown("### 📥 Download all files")
