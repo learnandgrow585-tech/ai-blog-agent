@@ -1,0 +1,17 @@
+# AI Blog Agent v2 — Python Dependencies
+# Install with: pip install -r requirements_v2.txt
+
+# ── Core AI ──────────────────────────────────────────────
+google-generativeai>=0.8.0     # Gemini API (free)
+groq>=0.9.0                    # Groq API (free, ultra-fast)
+
+# ── Environment & HTTP ───────────────────────────────────
+python-dotenv>=1.0.0           # reads .env file
+requests>=2.31.0               # HTTP calls to APIs
+
+# ── Voice Generation ─────────────────────────────────────
+edge-tts>=6.1.9                # Microsoft AI voices (free, no API key)
+
+# ── Video Assembly ───────────────────────────────────────
+moviepy>=1.0.3                 # video editing (free)
+Pillow>=10.0.0                 # image processing
