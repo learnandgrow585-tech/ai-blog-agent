@@ -548,28 +548,29 @@ def publish_hashnode(article: dict, social: dict, seo: dict, image_url: str,
         # reject these fields silently; add back once basic publish works
     }}
 
-    # Try both auth formats — Hashnode API docs are inconsistent across versions
-    payload = {"query": mutation, "variables": variables}
+    # Validate API key first with a lightweight query
+    test_q = {"query": "{ __typename }"}
+    for auth_fmt in [api_key, f"Bearer {api_key}"]:
+        tr = requests.post("https://gql.hashnode.com",
+                           json=test_q,
+                           headers={"Authorization": auth_fmt,
+                                    "Content-Type": "application/json"},
+                           timeout=15, allow_redirects=False)
+        if tr.ok and tr.text.strip().startswith("{"):
+            working_auth = auth_fmt
+            break
+    else:
+        raise RuntimeError(
+            "Hashnode API key rejected — the key is invalid or expired.\n"
+            "Fix: Go to hashnode.com → your profile → Account Settings → "
+            "Developer → delete old token → Generate new token → "
+            "update HASHNODE_API_KEY in Streamlit secrets."
+        )
 
-    for auth_header, endpoint in [
-        (f"Bearer {api_key}", "https://gql.hashnode.com"),
-        (api_key,             "https://gql.hashnode.com"),
-        (f"Bearer {api_key}", "https://api.hashnode.com"),
-    ]:
-        headers = {
-            "Authorization": auth_header,
-            "Content-Type":  "application/json",
-        }
-        r = requests.post(endpoint, json=payload, headers=headers,
-                          timeout=30, allow_redirects=False)
-
-        # Skip if we got redirected (3xx) or got HTML back
-        if r.status_code in (301, 302, 303, 307, 308):
-            continue
-        if r.ok and r.text.strip().startswith("<"):
-            continue   # HTML response = wrong endpoint/auth, try next
-
-        break  # Got a real response — use it
+    headers = {"Authorization": working_auth, "Content-Type": "application/json"}
+    r = requests.post("https://gql.hashnode.com",
+                      json={"query": mutation, "variables": variables},
+                      headers=headers, timeout=30, allow_redirects=False)
 
     if not r.ok:
         raise RuntimeError(
