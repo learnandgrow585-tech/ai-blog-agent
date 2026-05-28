@@ -559,13 +559,21 @@ def publish_hashnode(article: dict, social: dict, seo: dict, image_url: str,
                       json={"query": mutation, "variables": variables},
                       headers=headers, timeout=30)
 
-    # Raise a clear error showing the raw response if something is wrong
+    # Always show status + raw bytes so we know exactly what Hashnode returned
     if not r.ok:
-        raise RuntimeError(f"Hashnode HTTP {r.status_code}: {r.text[:400]}")
-    if not r.text.strip():
-        raise RuntimeError("Hashnode returned an empty response — check your API key and Publication ID.")
+        raise RuntimeError(
+            f"Hashnode HTTP {r.status_code} | "
+            f"body({len(r.content)}B): {r.text[:300] or '(empty)'}"
+        )
 
-    data = r.json()
+    try:
+        data = r.json()
+    except Exception:
+        raise RuntimeError(
+            f"Hashnode returned non-JSON (HTTP {r.status_code}) | "
+            f"{len(r.content)} bytes | raw: {repr(r.content[:120])}"
+        )
+
     if "errors" in data:
         msgs = "; ".join(e.get("message", str(e)) for e in data["errors"])
         raise RuntimeError(f"Hashnode GraphQL error: {msgs}")
