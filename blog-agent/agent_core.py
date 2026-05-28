@@ -544,22 +544,33 @@ def publish_hashnode(article: dict, social: dict, seo: dict, image_url: str,
         "contentMarkdown": article.get("content", ""),
         "publicationId":   pub_id,
         "tags":            hn_tags,
-        "coverImageOptions": {"coverImageURL": image_url},
-        "metaTags": {
-            "title":       seo.get("seo_title", article.get("title", ""))[:70],
-            "description": seo.get("meta_description", "")[:160],
-        }
+        # coverImageOptions and metaTags omitted — some Hashnode accounts
+        # reject these fields silently; add back once basic publish works
     }}
 
-    headers = {
-        "Authorization": api_key,   # Hashnode uses token directly (no Bearer)
-        "Content-Type":  "application/json",
-    }
-    r = requests.post("https://gql.hashnode.com",
-                      json={"query": mutation, "variables": variables},
-                      headers=headers, timeout=30)
+    # Try both auth formats — Hashnode API docs are inconsistent across versions
+    payload = {"query": mutation, "variables": variables}
 
-    # Always show status + raw bytes so we know exactly what Hashnode returned
+    for auth_header, endpoint in [
+        (f"Bearer {api_key}", "https://gql.hashnode.com"),
+        (api_key,             "https://gql.hashnode.com"),
+        (f"Bearer {api_key}", "https://api.hashnode.com"),
+    ]:
+        headers = {
+            "Authorization": auth_header,
+            "Content-Type":  "application/json",
+        }
+        r = requests.post(endpoint, json=payload, headers=headers,
+                          timeout=30, allow_redirects=False)
+
+        # Skip if we got redirected (3xx) or got HTML back
+        if r.status_code in (301, 302, 303, 307, 308):
+            continue
+        if r.ok and r.text.strip().startswith("<"):
+            continue   # HTML response = wrong endpoint/auth, try next
+
+        break  # Got a real response — use it
+
     if not r.ok:
         raise RuntimeError(
             f"Hashnode HTTP {r.status_code} | "
